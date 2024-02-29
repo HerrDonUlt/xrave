@@ -29,12 +29,7 @@ enum ParseState {
     ExpectLinkStart,
 }
 
-fn main() {
-    match parse_links("some:0 table:0\n".as_bytes()) {
-        Err(err) => panic!("{:?}", err),
-        Ok(links) => dbg!(links.len()),
-    };
-}
+fn main() {}
 
 #[cfg(test)]
 mod tests {
@@ -42,14 +37,14 @@ mod tests {
 
     #[test]
     fn parse_test_string() {
-        match parse_links("some:0 table:0\n".as_bytes()) {
+        match parse_links("some:0 table:0\n".as_bytes(), 10) {
             Err(err) => panic!("{:?}", err),
             Ok(mut links) => {
                 assert!(links.len() == 2);
                 let l1 = links.pop().unwrap();
-                assert!(l1.name.pos == 7);
+                assert!(l1.name.pos == 17);
                 assert!(l1.name.len == 5);
-                assert!(l1.seek.pos == 13);
+                assert!(l1.seek.pos == 23);
                 assert!(l1.seek.len == 1);
             }
         };
@@ -62,7 +57,7 @@ const BRACKET: u8 = b'"';
 const CR: u8 = b'\r';
 const NL: u8 = b'\n';
 
-fn parse_links(line: &[u8]) -> Result<Vec<Link>, LinkErr> {
+fn parse_links(line: &[u8], start: usize) -> Result<Vec<Link>, LinkErr> {
     let mut state = ParseState::ExpectLinkMid;
     let mut seek: usize = 0;
     let it = line.bytes();
@@ -76,7 +71,7 @@ fn parse_links(line: &[u8]) -> Result<Vec<Link>, LinkErr> {
                 match (byte, &state) {
                     (COLON, ParseState::ExpectLinkMid) => {
                         refs.push(ReadRef {
-                            pos: seek,
+                            pos: start + seek,
                             len: i - seek,
                         });
                         seek = i + 1;
@@ -86,7 +81,7 @@ fn parse_links(line: &[u8]) -> Result<Vec<Link>, LinkErr> {
                     (COLON, _) => return Err(LinkErr::LinkNameFailToTerminateParse(i)),
                     (SPACE, ParseState::ExpectLinkEnd) => {
                         refs.push(ReadRef {
-                            pos: seek,
+                            pos: start + seek,
                             len: i - seek,
                         });
                         seek = i + 1;
@@ -95,14 +90,14 @@ fn parse_links(line: &[u8]) -> Result<Vec<Link>, LinkErr> {
                     (SPACE, _) => return Err(LinkErr::LinkSeekFailToTerminateParse(i)),
                     (CR, ParseState::ExpectLinkEnd) => {
                         refs.push(ReadRef {
-                            pos: seek,
+                            pos: start + seek,
                             len: i - seek,
                         });
                         break;
                     }
                     (NL, ParseState::ExpectLinkEnd) => {
                         refs.push(ReadRef {
-                            pos: seek,
+                            pos: start + seek,
                             len: i - seek,
                         });
                         break;
