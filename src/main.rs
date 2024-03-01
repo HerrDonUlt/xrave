@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::io::{prelude::*, SeekFrom};
 use std::{fs::File, io::BufReader};
 
@@ -15,15 +14,27 @@ struct Link {
 }
 
 #[derive(Debug)]
+struct ParsedLine {
+    links: Vec<Link>,
+    start: usize,
+    len: usize,
+}
+
+#[derive(Debug)]
+enum Lines {
+    TableLine(ParsedLine),
+    StyleLine(ParsedLine),
+    RecordLine(ParsedLine),
+}
+
+#[derive(Debug)]
 enum LinkErr {
     FstFailToParse(usize),
     SndFailToParse(usize),
     NextFailToParse(usize),
 
     FailedToConsumedRefs,
-    NotTalbeLine,
-    NotStyleLine,
-    NotRecordLine,
+    NotParsedLine,
 
     FailedToGetLinkFromBuf,
 }
@@ -81,6 +92,15 @@ fn read_line(buffer: &mut BufReader<File>) -> std::io::Result<ReadLine> {
             buffer: temp,
             read_bytes: rb,
         }),
+    }
+}
+
+fn parse_line(line: ReadLine, start: usize) -> Result<Lines, LinkErr> {
+    match line.buffer[0] {
+        TABLECHAR => {}
+        STYLECHAR => Ok(Lines::StyleLine(parse_links(line, start))),
+        RECORDCHAR => Ok(Lines::RecordLine(parse_links(line, start))),
+        _ => Err(LinkErr::NotParsedLine),
     }
 }
 
@@ -206,28 +226,19 @@ fn parse_links(line: &[u8], start: usize) -> Result<Vec<Link>, LinkErr> {
 }
 
 const TABLECHAR: u8 = b't';
-
-fn parse_table_line(line: &[u8], start: usize) -> Result<Vec<Link>, LinkErr> {
-    match line[0] {
-        TABLECHAR => match parse_links(line, start) {
-            Err(err) => Err(err),
-            Ok(links) => Ok(links),
-        },
-
-        _ => Err(LinkErr::NotTalbeLine),
-    }
-}
+const STYLECHAR: u8 = b's';
+const RECORDCHAR: u8 = b'r';
 
 fn get_link(buffer: &mut BufReader<File>, link: &Link) -> std::io::Result<Vec<Vec<u8>>> {
     let mut ret: Vec<Vec<u8>> = Vec::new();
-    buffer.seek(SeekFrom::Current(link.name.pos as i64));
+    let _ = buffer.seek(SeekFrom::Current(link.name.pos as i64));
     let mut name: Vec<u8> = Vec::new();
     name.resize(link.name.len, b'0');
     match buffer.read_exact(&mut name) {
         Err(err) => return Err(err),
         Ok(_) => ret.push(name),
     };
-    buffer.seek(SeekFrom::Current(1));
+    let _ = buffer.seek(SeekFrom::Current(1));
     let mut seek: Vec<u8> = Vec::new();
     seek.resize(link.seek.len, b'0');
 
