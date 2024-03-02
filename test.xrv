@@ -1,4 +1,4 @@
-some:0 table:0
+j:jump some:0 table:0
 t:some Header:string Position:i32
 t:table Header:string Ghost:i32
 s:0 border-width:5
