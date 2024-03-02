@@ -2,13 +2,14 @@ use std::collections::HashMap;
 use std::io::{prelude::*, SeekFrom};
 use std::{fs::File, io::BufReader};
 
+#[derive(Debug)]
 struct FieldRef {
     pos: usize,
     len: usize,
 }
 
 #[derive(Debug, Clone)]
-struct Field {
+pub struct Field {
     name: Vec<u8>,
     value: Vec<u8>,
 }
@@ -30,13 +31,15 @@ pub enum XRVErr {
     FieldValueFailedToParse(usize, usize),
     NextFieldFailedToParse(usize, usize),
 
+    EmptyLine(Line),
+
     FailedToConsumeRefs(usize, usize),
 
     UnknownLine(Line),
     FailToGetStreamPosition(std::io::Error),
 }
 
-enum Lines {
+pub enum Lines {
     JumpLine(Line),
     TableLine(Line),
     StyleLine(Line),
@@ -44,7 +47,7 @@ enum Lines {
 }
 
 #[derive(Debug)]
-struct Line {
+pub struct Line {
     buffer: Vec<u8>,
     start: u64,
     len: usize,
@@ -53,16 +56,17 @@ struct Line {
 #[derive(Debug)]
 pub struct XRVReader {
     buffer: BufReader<File>,
-    seek: usize,
-    line: usize,
-    jumps: HashMap<Vec<u8>, Vec<u8>>,
-    tables: HashMap<Vec<u8>, Vec<Field>>,
-    styles: HashMap<Vec<u8>, Vec<Field>>,
+    pub seek: usize,
+    pub line: usize,
+    pub jumps: HashMap<Vec<u8>, Vec<u8>>,
+    pub tables: HashMap<Vec<u8>, Vec<Field>>,
+    pub styles: HashMap<Vec<u8>, Vec<Field>>,
 }
 
 const TABLECHAR: u8 = b't';
 const STYLECHAR: u8 = b's';
 const RECORDCHAR: u8 = b'r';
+const JUMPCHAR: u8 = b'j';
 const COLON: u8 = b':';
 const SPACE: u8 = b' ';
 const BRACKET: u8 = b'"';
@@ -84,6 +88,12 @@ impl XRVReader {
         }
     }
 
+    pub fn parse_next(&mut self) -> Result<(), XRVErr> {
+        let line = self.next()?;
+        self.parse_line(XRVReader::linekind(line)?)?;
+        Ok(())
+    }
+
     fn next(&mut self) -> Result<Line, XRVErr> {
         let mut buffer: Vec<u8> = Vec::new();
         let start = match self.buffer.stream_position() {
@@ -91,10 +101,10 @@ impl XRVReader {
             Ok(pos) => pos,
         };
         match self.buffer.read_until(NEWLINE, &mut buffer) {
-            Err(err) => Err(XRVErr::FailToReadUntil(err)),
+            Err(err) => return Err(XRVErr::FailToReadUntil(err)),
             Ok(len) => {
                 self.line += 1;
-                Ok(Line { buffer, start, len })
+                return Ok(Line { buffer, start, len });
             }
         }
     }
@@ -105,6 +115,8 @@ impl XRVReader {
             STYLECHAR => Ok(Lines::StyleLine(line)),
             TABLECHAR => Ok(Lines::TableLine(line)),
             JUMPCHAR => Ok(Lines::JumpLine(line)),
+            CR => Err(XRVErr::EmptyLine(line)),
+            NEWLINE => Err(XRVErr::EmptyLine(line)),
             _ => Err(XRVErr::UnknownLine(line)),
         }
     }
@@ -114,7 +126,7 @@ impl XRVReader {
             Lines::JumpLine(line) => {
                 self.jumps = match XRVReader::meta_fields(line) {
                     Err(err) => return Err(err),
-                    Ok(jumps) => XRVReader::to_hashmap(jumps),
+                    Ok(jumps) => XRVReader::to_hashmap(jumps[1..].to_vec()),
                 }
             }
             Lines::TableLine(line) => match XRVReader::meta_fields(line) {
@@ -160,7 +172,7 @@ impl XRVReader {
                     match (byte, &state) {
                         (COLON, FieldState::ExpectMid) => {
                             refs.push(FieldRef {
-                                pos: line.start as usize + seek,
+                                pos: seek,
                                 len: i - seek,
                             });
                             seek = i + 1;
@@ -172,7 +184,7 @@ impl XRVReader {
                         }
                         (SPACE, FieldState::ExpectEnd) => {
                             refs.push(FieldRef {
-                                pos: line.start as usize + seek,
+                                pos: seek,
                                 len: i - seek,
                             });
                             seek = i + 1;
@@ -183,14 +195,14 @@ impl XRVReader {
                         }
                         (CR, FieldState::ExpectEnd) => {
                             refs.push(FieldRef {
-                                pos: line.start as usize + seek,
+                                pos: seek,
                                 len: i - seek,
                             });
                             break;
                         }
                         (NEWLINE, FieldState::ExpectEnd) => {
                             refs.push(FieldRef {
-                                pos: line.start as usize + seek,
+                                pos: seek,
                                 len: i - seek,
                             });
                             break;
@@ -234,8 +246,8 @@ impl XRVReader {
                     }
                     Some(fvalue) => {
                         fields.push(Field {
-                            name: line.buffer[fname.pos..fname.len].to_vec(),
-                            value: line.buffer[fvalue.pos..fvalue.len].to_vec(),
+                            name: line.buffer[fname.pos..fname.pos + fname.len].to_vec(),
+                            value: line.buffer[fvalue.pos..fvalue.pos + fvalue.len].to_vec(),
                         });
                         consume_idx += 1;
                     }

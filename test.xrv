@@ -1,6 +1,5 @@
-j:jump some:0 table:0
-t:some Header:string Position:i32
-t:table Header:string Ghost:i32
+t:some name:"some name" pos:0 len:0 | Header:string Position:i32
+t:table name:"some table" pos:0 len:1 | Header:string Ghost:i32
 s:0 border-width:5
-r:some "Moscow":0 "25":0
-r:table "Fiech":0 "22":0
+r:some | "Moscow":0 "25":0
+r:table | "Fiech":0 "22":0
