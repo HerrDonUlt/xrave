@@ -1,34 +1,14 @@
+use std::collections::HashMap;
 use std::io::{prelude::*, SeekFrom};
 use std::{fs::File, io::BufReader};
 
-#[derive(Debug)]
-struct ReadRef {
-    pos: usize,
-    len: usize,
+struct Field {
+    name: Vec<u8>,
+    value: Vec<u8>,
 }
 
 #[derive(Debug)]
-struct Link {
-    name: ReadRef,
-    seek: ReadRef,
-}
-
-#[derive(Debug)]
-struct ParsedLine {
-    links: Vec<Link>,
-    start: usize,
-    len: usize,
-}
-
-#[derive(Debug)]
-enum Lines {
-    TableLine(ParsedLine),
-    StyleLine(ParsedLine),
-    RecordLine(ParsedLine),
-}
-
-#[derive(Debug)]
-enum LinkErr {
+enum XRVErr {
     FstFailToParse(usize),
     SndFailToParse(usize),
     NextFailToParse(usize),
@@ -37,38 +17,165 @@ enum LinkErr {
     NotParsedLine,
 
     FailedToGetLinkFromBuf,
+    FailToOpenFile(std::io::Error),
+    FailToReadUntil(std::io::Error),
+    FailToEnumerateByte(usize),
+
+    NotMetaLine(usize),
+    NotRecordLine(usize),
+    UnknownLine(usize),
+    FailToGetStreamPosition(std::io::Error),
 }
 
 #[derive(Debug)]
-enum ParseState {
-    ExpectLinkMid,
-    ExpectLinkEnd,
-    ExpectLinkStart,
+enum FieldState {
+    ExpectMid,
+    ExpectEnd,
+    ExpectStart,
 }
 
-fn main() {
-    let mut file: File;
-    match File::open("test.xrv") {
-        Err(err) => panic!("{:?}", err),
-        Ok(f) => file = f,
+enum Lines {
+    TableLine(Line),
+    StyleLine(Line),
+    RecordLine(Line),
+}
+
+struct Line {
+    buffer: Vec<u8>,
+    start: u64,
+    len: usize,
+}
+
+struct XRVReader {
+    buffer: BufReader<File>,
+    read_bytes: usize,
+    jumps: HashMap<Vec<u8>, usize>,
+    tables: HashMap<Vec<u8>, Vec<Field>>,
+    styles: HashMap<Vec<u8>, Vec<Field>>,
+}
+
+impl XRVReader {
+    fn new(path: String) -> Result<XRVReader, XRVErr> {
+        match File::open(path) {
+            Err(err) => Err(XRVErr::FailToOpenFile(err)),
+            Ok(file) => Ok(XRVReader {
+                buffer: BufReader::new(file),
+                read_bytes: 0,
+                jumps: HashMap::new(),
+                tables: HashMap::new(),
+                styles: HashMap::new(),
+            }),
+        }
     }
 
-    let mut buf = BufReader::new(file);
-    let mut reader_read_bytes: usize = 0;
+    fn next(&mut self, meta: bool) -> Result<Lines, XRVErr> {
+        let mut buffer: Vec<u8> = Vec::new();
+        let start = match self.buffer.stream_position() {
+            Err(err) => return Err(XRVErr::FailToGetStreamPosition(err)),
+            Ok(pos) => pos,
+        };
+        match self.buffer.read_until(NEWLINE, &mut buffer) {
+            Err(err) => Err(XRVErr::FailToReadUntil(err)),
+            Ok(len) => match (buffer[0], meta) {
+                (RECORDCHAR, true) => Err(XRVErr::NotMetaLine(len)),
+                (RECORDCHAR, false) => Ok(Lines::RecordLine(Line { buffer, start, len })),
+                (TABLECHAR, true) => Ok(Lines::TableLine(Line { buffer, start, len })),
+                (TABLECHAR, false) => Err(XRVErr::NotRecordLine(len)),
+                (STYLECHAR, true) => Ok(Lines::StyleLine(Line { buffer, start, len })),
+                (STYLECHAR, false) => Err(XRVErr::NotRecordLine(len)),
+                (_, _) => Err(XRVErr::UnknownLine(len)),
+            },
+        }
+    }
 
-    let mut rl = ReadLine {
-        buffer: Vec::new(),
-        read_bytes: 0,
+    fn fields(line: &[u8], start: usize) -> Result<Vec<Field>, XRVErr> {
+        let mut state = FieldState::ExpectMid;
+        let mut seek: usize = 0;
+        let it = line.bytes();
+
+        let mut refs: Vec<Field> = Vec::new();
+
+        for (i, b) in it.enumerate() {
+            match b {
+                Err(err) => return Err(XRVErr::FailToEnumerateByte(i)),
+                Ok(byte) => {
+                    match (byte, &state) {
+                        (COLON, FieldState::ExpectMid) => {
+                            refs.push(Field {
+                                pos: start + seek,
+                                len: i - seek,
+                            });
+                            seek = i + 1;
+                            state = FieldState::ExpectEnd;
+                        }
+
+                        (COLON, _) => return Err(XRVErr::FstFailToParse(i)),
+                        (SPACE, FieldState::ExpectEnd) => {
+                            refs.push(ReadRef {
+                                pos: start + seek,
+                                len: i - seek,
+                            });
+                            seek = i + 1;
+                            state = FieldState::ExpectStart;
+                        }
+                        (SPACE, _) => return Err(XRVErr::SndFailToParse(i)),
+                        (CR, FieldState::ExpectEnd) => {
+                            refs.push(ReadRef {
+                                pos: start + seek,
+                                len: i - seek,
+                            });
+                            break;
+                        }
+                        (NEWLINE, FieldState::ExpectEnd) => {
+                            refs.push(ReadRef {
+                                pos: start + seek,
+                                len: i - seek,
+                            });
+                            break;
+                        }
+                        (_, FieldState::ExpectStart) => match byte {
+                            COLON => return Err(XRVErr::NextFailToParse(i)),
+                            SPACE => continue,
+                            CR => return Err(XRVErr::NextFailToParse(i)),
+                            NEWLINE => return Err(XRVErr::NextFailToParse(i)),
+                            _ => {
+                                state = FieldState::ExpectMid;
+                            }
+                        },
+                        (_, FieldState::ExpectMid) => continue,
+                        (_, FieldState::ExpectEnd) => {
+                            continue;
+                        }
+                    };
+                }
+            }
+        }
+        let mut links: Vec<Link> = Vec::new();
+        let mut ref_it = refs.into_iter();
+
+        loop {
+            match ref_it.next() {
+                None => break,
+                Some(name) => match ref_it.next() {
+                    None => return Err(XRVErr::FailedToConsumedRefs),
+                    Some(seek) => {
+                        links.push(Link { name, seek });
+                    }
+                },
+            }
+        }
+        Ok(links)
+    }
+}
+
+fn main() -> Result<(), XRVErr> {
+    let reader = XRVReader::new("test.xrv".into())?;
+
+    let mut links = match parse_links(&read_line.buffer, reader_read_bytes) {
+        Err(err) => panic!("{:?}", err),
+        Ok(ls) => ls,
     };
-    match read_line(&mut buf) {
-        Err(err) => panic!("{:?}", err),
-        Ok(trl) => rl = trl,
-    }
-    let mut links: Vec<Link> = Vec::new();
-    match parse_links(&rl.buffer, reader_read_bytes) {
-        Err(err) => panic!("{:?}", err),
-        Ok(ls) => links = ls,
-    }
+
     dbg!(&links[1]);
     let mut res: Vec<Vec<u8>> = Vec::new();
     match get_link(&mut buf, &links[1]) {
@@ -77,22 +184,7 @@ fn main() {
     }
 
     dbg!(&res);
-}
-
-struct ReadLine {
-    buffer: Vec<u8>,
-    read_bytes: usize,
-}
-
-fn read_line(buffer: &mut BufReader<File>) -> std::io::Result<ReadLine> {
-    let mut temp: Vec<u8> = Vec::new();
-    match buffer.read_until(b'\n', &mut temp) {
-        Err(err) => Err(err),
-        Ok(rb) => Ok(ReadLine {
-            buffer: temp,
-            read_bytes: rb,
-        }),
-    }
+    Ok(())
 }
 
 fn parse_line(line: ReadLine, start: usize) -> Result<Lines, LinkErr> {
@@ -144,86 +236,7 @@ const COLON: u8 = b':';
 const SPACE: u8 = b' ';
 const BRACKET: u8 = b'"';
 const CR: u8 = b'\r';
-const NL: u8 = b'\n';
-
-fn parse_links(line: &[u8], start: usize) -> Result<Vec<Link>, LinkErr> {
-    let mut state = ParseState::ExpectLinkMid;
-    let mut seek: usize = 0;
-    let it = line.bytes();
-
-    let mut refs: Vec<ReadRef> = Vec::new();
-
-    for (i, b) in it.enumerate() {
-        match b {
-            Err(err) => panic!("{:?}", err),
-            Ok(byte) => {
-                match (byte, &state) {
-                    (COLON, ParseState::ExpectLinkMid) => {
-                        refs.push(ReadRef {
-                            pos: start + seek,
-                            len: i - seek,
-                        });
-                        seek = i + 1;
-                        state = ParseState::ExpectLinkEnd;
-                    }
-
-                    (COLON, _) => return Err(LinkErr::FstFailToParse(i)),
-                    (SPACE, ParseState::ExpectLinkEnd) => {
-                        refs.push(ReadRef {
-                            pos: start + seek,
-                            len: i - seek,
-                        });
-                        seek = i + 1;
-                        state = ParseState::ExpectLinkStart;
-                    }
-                    (SPACE, _) => return Err(LinkErr::SndFailToParse(i)),
-                    (CR, ParseState::ExpectLinkEnd) => {
-                        refs.push(ReadRef {
-                            pos: start + seek,
-                            len: i - seek,
-                        });
-                        break;
-                    }
-                    (NL, ParseState::ExpectLinkEnd) => {
-                        refs.push(ReadRef {
-                            pos: start + seek,
-                            len: i - seek,
-                        });
-                        break;
-                    }
-                    (_, ParseState::ExpectLinkStart) => match byte {
-                        COLON => return Err(LinkErr::NextFailToParse(i)),
-                        SPACE => continue,
-                        CR => return Err(LinkErr::NextFailToParse(i)),
-                        NL => return Err(LinkErr::NextFailToParse(i)),
-                        _ => {
-                            state = ParseState::ExpectLinkMid;
-                        }
-                    },
-                    (_, ParseState::ExpectLinkMid) => continue,
-                    (_, ParseState::ExpectLinkEnd) => {
-                        continue;
-                    }
-                };
-            }
-        }
-    }
-    let mut links: Vec<Link> = Vec::new();
-    let mut ref_it = refs.into_iter();
-
-    loop {
-        match ref_it.next() {
-            None => break,
-            Some(name) => match ref_it.next() {
-                None => return Err(LinkErr::FailedToConsumedRefs),
-                Some(seek) => {
-                    links.push(Link { name, seek });
-                }
-            },
-        }
-    }
-    Ok(links)
-}
+const NEWLINE: u8 = b'\n';
 
 const TABLECHAR: u8 = b't';
 const STYLECHAR: u8 = b's';
