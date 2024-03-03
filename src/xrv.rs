@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{prelude::*, SeekFrom};
+use std::io::{prelude::*, Bytes, SeekFrom};
 use std::{fs::File, io::BufReader};
 
 #[derive(Debug)]
@@ -9,9 +9,29 @@ struct FieldRef {
 }
 
 #[derive(Debug, Clone)]
+enum FieldName {
+    TableLine,
+    StyleLine,
+    RecordLine,
+    Name,
+    Len,
+    Pos,
+    RowName(Vec<u8>),
+}
+
+#[derive(Debug, Clone)]
+enum FieldValue {
+    String,
+    I32,
+    Zero,
+    InBrackets(Vec<u8>),
+    Just(Vec<u8>),
+}
+
+#[derive(Debug, Clone)]
 pub struct Field {
-    name: Vec<u8>,
-    value: Vec<u8>,
+    name: FieldName,
+    value: FieldValue,
 }
 
 #[derive(Debug)]
@@ -19,6 +39,7 @@ enum FieldState {
     ExpectMid,
     ExpectEnd,
     ExpectStart,
+    ExpectBracket,
 }
 
 #[derive(Debug)]
@@ -30,13 +51,20 @@ pub enum XRVErr {
     FieldNameFailedToParse(usize, usize),
     FieldValueFailedToParse(usize, usize),
     NextFieldFailedToParse(usize, usize),
+    FieldBracketFailedToParse(usize, usize),
 
     EmptyLine(Line),
+    ZeroLine(usize),
 
     FailedToConsumeRefs(usize, usize),
 
     UnknownLine(Line),
     FailToGetStreamPosition(std::io::Error),
+
+    NotExpectingNewline(usize, usize),
+    ExpectEndNotMidOrStart(usize, usize),
+    ExpectColon(usize, usize),
+    ExpectSpace(usize, usize),
 }
 
 pub enum Lines {
@@ -73,6 +101,13 @@ const BRACKET: u8 = b'"';
 const CR: u8 = b'\r';
 const NEWLINE: u8 = b'\n';
 
+#[derive(Debug)]
+pub enum Link {
+    Left(usize, usize),
+    Right(usize, usize),
+    Bracket(usize, usize),
+}
+
 impl XRVReader {
     pub fn new(path: String) -> Result<XRVReader, XRVErr> {
         match File::open(path) {
@@ -88,11 +123,11 @@ impl XRVReader {
         }
     }
 
-    pub fn parse_next(&mut self) -> Result<(), XRVErr> {
-        let line = self.next()?;
-        self.parse_line(XRVReader::linekind(line)?)?;
-        Ok(())
-    }
+    // pub fn parse_next(&mut self) -> Result<(), XRVErr> {
+    //     let line = self.next()?;
+    //     self.parse_line(XRVReader::linekind(line)?)?;
+    //     Ok(())
+    // }
 
     fn next(&mut self) -> Result<Line, XRVErr> {
         let mut buffer: Vec<u8> = Vec::new();
@@ -102,158 +137,109 @@ impl XRVReader {
         };
         match self.buffer.read_until(NEWLINE, &mut buffer) {
             Err(err) => return Err(XRVErr::FailToReadUntil(err)),
-            Ok(len) => {
-                self.line += 1;
-                return Ok(Line { buffer, start, len });
-            }
+            Ok(len) => match len {
+                0 => Err(XRVErr::ZeroLine(self.line)),
+                _ => {
+                    self.line += 1;
+                    return Ok(Line { buffer, start, len });
+                }
+            },
         }
     }
 
-    fn linekind(line: Line) -> Result<Lines, XRVErr> {
+    pub fn parse_next(&mut self) -> Result<(), XRVErr> {
+        let line = self.next()?;
         match line.buffer[0] {
-            RECORDCHAR => Ok(Lines::RecordLine(line)),
-            STYLECHAR => Ok(Lines::StyleLine(line)),
-            TABLECHAR => Ok(Lines::TableLine(line)),
-            JUMPCHAR => Ok(Lines::JumpLine(line)),
-            CR => Err(XRVErr::EmptyLine(line)),
-            NEWLINE => Err(XRVErr::EmptyLine(line)),
-            _ => Err(XRVErr::UnknownLine(line)),
-        }
-    }
-
-    fn parse_line(&mut self, input_line: Lines) -> Result<(), XRVErr> {
-        match input_line {
-            Lines::JumpLine(line) => {
-                self.jumps = match XRVReader::meta_fields(line) {
-                    Err(err) => return Err(err),
-                    Ok(jumps) => XRVReader::to_hashmap(jumps[1..].to_vec()),
-                }
+            TABLECHAR => {
+                todo!("table line");
             }
-            Lines::TableLine(line) => match XRVReader::meta_fields(line) {
-                Err(err) => return Err(err),
-                Ok(table_fields) => {
-                    self.tables
-                        .insert(table_fields[0].value.clone(), table_fields[1..].to_vec());
-                }
-            },
-            Lines::StyleLine(line) => match XRVReader::meta_fields(line) {
-                Err(err) => return Err(err),
-                Ok(style_fields) => {
-                    self.styles
-                        .insert(style_fields[0].value.clone(), style_fields[1..].to_vec());
-                }
-            },
-            Lines::RecordLine(line) => {
-                todo!();
-            }
+            STYLECHAR => todo!("style line"),
+            RECORDCHAR => todo!("record line"),
+            CR => return Err(XRVErr::EmptyLine(line)),
+            NEWLINE => return Err(XRVErr::EmptyLine(line)),
+            _ => return Err(XRVErr::UnknownLine(line)),
         };
         Ok(())
     }
 
-    fn to_hashmap(fields: Vec<Field>) -> HashMap<Vec<u8>, Vec<u8>> {
-        let mut hm: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
-        for field in fields {
-            hm.insert(field.name, field.value);
-        }
-        hm
-    }
+    // fn to_hashmap(fields: Vec<Field>) -> HashMap<Vec<u8>, Vec<u8>> {
+    //     let mut hm: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
+    //     for field in fields {
+    //         hm.insert(field.name, field.value);
+    //     }
+    //     hm
+    // }
 
-    fn meta_fields(line: Line) -> Result<Vec<Field>, XRVErr> {
+    pub fn links(line: Line, linenum: usize) -> Result<Vec<Link>, XRVErr> {
         let mut state = FieldState::ExpectMid;
         let mut seek: usize = 0;
         let it = line.buffer.bytes();
 
-        let mut refs: Vec<FieldRef> = Vec::new();
+        let mut links: Vec<Link> = Vec::new();
 
         for (i, b) in it.enumerate() {
             match b {
-                Err(err) => return Err(XRVErr::FailToEnumerateByte(i)),
+                Err(_) => return Err(XRVErr::FailToEnumerateByte(i)),
                 Ok(byte) => {
                     match (byte, &state) {
                         (COLON, FieldState::ExpectMid) => {
-                            refs.push(FieldRef {
-                                pos: seek,
-                                len: i - seek,
-                            });
+                            links.push(Link::Left(seek, i - seek));
                             seek = i + 1;
                             state = FieldState::ExpectEnd;
                         }
+                        (COLON, FieldState::ExpectBracket) => continue,
 
-                        (COLON, _) => {
-                            return Err(XRVErr::FieldNameFailedToParse(line.start as usize, i))
+                        (COLON, _) => return Err(XRVErr::ExpectColon(linenum, i)),
+
+                        (BRACKET, FieldState::ExpectEnd) => {
+                            state = FieldState::ExpectBracket;
+                            seek = i;
                         }
-                        (SPACE, FieldState::ExpectEnd) => {
-                            refs.push(FieldRef {
-                                pos: seek,
-                                len: i - seek,
-                            });
+                        (BRACKET, FieldState::ExpectBracket) => {
+                            links.push(Link::Bracket(seek, i - seek - 1));
                             seek = i + 1;
                             state = FieldState::ExpectStart;
                         }
-                        (SPACE, _) => {
-                            return Err(XRVErr::FieldValueFailedToParse(line.start as usize, i))
+
+                        (BRACKET, _) => {
+                            return Err(XRVErr::ExpectEndNotMidOrStart(linenum, i));
                         }
+
+                        (SPACE, FieldState::ExpectEnd) => {
+                            links.push(Link::Right(seek, i - seek));
+                            seek = i + 1;
+                            state = FieldState::ExpectStart;
+                        }
+                        (SPACE, FieldState::ExpectStart | FieldState::ExpectBracket) => continue,
+                        (SPACE, FieldState::ExpectMid) => {
+                            return Err(XRVErr::ExpectSpace(linenum, i))
+                        }
+
                         (CR, FieldState::ExpectEnd) => {
-                            refs.push(FieldRef {
-                                pos: seek,
-                                len: i - seek,
-                            });
+                            links.push(Link::Right(seek, i - seek));
                             break;
                         }
+                        (CR, FieldState::ExpectStart) => break,
+                        (CR, _) => return Err(XRVErr::NotExpectingNewline(linenum, i)),
+
                         (NEWLINE, FieldState::ExpectEnd) => {
-                            refs.push(FieldRef {
-                                pos: seek,
-                                len: i - seek,
-                            });
+                            links.push(Link::Right(seek, i - seek));
                             break;
                         }
-                        (_, FieldState::ExpectStart) => match byte {
-                            COLON => {
-                                return Err(XRVErr::NextFieldFailedToParse(line.start as usize, i))
-                            }
-                            SPACE => continue,
-                            CR => {
-                                return Err(XRVErr::NextFieldFailedToParse(line.start as usize, i))
-                            }
-                            NEWLINE => {
-                                return Err(XRVErr::NextFieldFailedToParse(line.start as usize, i))
-                            }
-                            _ => {
-                                state = FieldState::ExpectMid;
-                            }
-                        },
+                        (NEWLINE, FieldState::ExpectStart) => break,
+                        (NEWLINE, _) => return Err(XRVErr::NotExpectingNewline(linenum, i)),
+
                         (_, FieldState::ExpectMid) => continue,
-                        (_, FieldState::ExpectEnd) => {
-                            continue;
+                        (_, FieldState::ExpectEnd) => continue,
+                        (_, FieldState::ExpectStart) => {
+                            seek = i;
+                            state = FieldState::ExpectMid;
                         }
+                        (_, FieldState::ExpectBracket) => continue,
                     };
                 }
             }
         }
-        let mut fields: Vec<Field> = Vec::new();
-        let mut ref_it = refs.into_iter();
-
-        let mut consume_idx: usize = 0;
-        loop {
-            match ref_it.next() {
-                None => break,
-                Some(fname) => match ref_it.next() {
-                    None => {
-                        return Err(XRVErr::FailedToConsumeRefs(
-                            line.start as usize,
-                            consume_idx,
-                        ))
-                    }
-                    Some(fvalue) => {
-                        fields.push(Field {
-                            name: line.buffer[fname.pos..fname.pos + fname.len].to_vec(),
-                            value: line.buffer[fvalue.pos..fvalue.pos + fvalue.len].to_vec(),
-                        });
-                        consume_idx += 1;
-                    }
-                },
-            }
-        }
-        Ok(fields)
+        Ok(links)
     }
 }
