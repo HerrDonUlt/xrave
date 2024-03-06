@@ -1,5 +1,4 @@
-use xrv::XRVReader;
-
+mod newxrv;
 mod xrv;
 
 fn main() -> Result<(), xrv::XRVErr> {

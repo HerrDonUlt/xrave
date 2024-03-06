@@ -1,12 +1,6 @@
 use std::collections::HashMap;
-use std::io::{prelude::*, Bytes, SeekFrom};
+use std::io::prelude::*;
 use std::{fs::File, io::BufReader};
-
-#[derive(Debug)]
-struct FieldRef {
-    pos: usize,
-    len: usize,
-}
 
 #[derive(Debug, Clone)]
 enum FieldName {
@@ -65,13 +59,51 @@ pub enum XRVErr {
     ExpectEndNotMidOrStart(usize, usize),
     ExpectColon(usize, usize),
     ExpectSpace(usize, usize),
+
+    FailToGetLinkRight(usize, usize),
+
+    TableNameMustBeInBrackets(usize, usize),
+    SecondFieldLeftMustBeName(usize, usize),
+    FailToGetTableName(usize, usize),
+    FailGetStrFrombuffer(usize, usize),
+    FailGetUsizeFromStr(usize, usize),
+    ThirdFieldLeftMustBePos(usize, usize),
+    FailToGetTablePos(usize, usize),
+    ForthFieldLeftMustBeLen(usize, usize),
+    FailToGetTableLen(usize, usize),
+    NameMustFolowedByColon,
+    NameMustNotContainQoutes,
+    ExpectSpaceOrAlpha,
+    ExpectAlpha,
+    ExpectingSpaceOrNewline,
+    ExpectingQouteNotNewline,
+    FailedToConsumePairs,
+    FailToGetLineKind,
+    FailToGetLineName,
 }
 
 pub enum Lines {
-    JumpLine(Line),
     TableLine(Line),
     StyleLine(Line),
     RecordLine(Line),
+}
+
+enum ColKind {
+    String,
+    I32,
+}
+
+struct Col {
+    name: Vec<u8>,
+    kind: ColKind,
+}
+
+struct TableLine {
+    id: Vec<u8>,
+    name: Vec<u8>,
+    pos: usize,
+    len: usize,
+    rows: Vec<Col>,
 }
 
 #[derive(Debug)]
@@ -94,7 +126,6 @@ pub struct XRVReader {
 const TABLECHAR: u8 = b't';
 const STYLECHAR: u8 = b's';
 const RECORDCHAR: u8 = b'r';
-const JUMPCHAR: u8 = b'j';
 const COLON: u8 = b':';
 const SPACE: u8 = b' ';
 const BRACKET: u8 = b'"';
@@ -162,6 +193,98 @@ impl XRVReader {
         Ok(())
     }
 
+    fn parse_table_line(
+        line: Line,
+        line_links: Vec<Link>,
+        linenum: usize,
+    ) -> Result<TableLine, XRVErr> {
+        let id: Vec<u8> = match line_links[1] {
+            Link::Right(start, len) => line.buffer[start..start + len].to_vec(),
+            _ => return Err(XRVErr::FailToGetLinkRight(linenum, 1)),
+        };
+        let name: Vec<u8> = match line_links[2] {
+            Link::Left(nstart, nlen) => {
+                if [b'n', b'a', b'm', b'e'] == line.buffer[nstart..nstart + nlen] {
+                    match line_links[3] {
+                        Link::Bracket(vstart, vlen) => line.buffer[vstart..vstart + vlen].to_vec(),
+                        _ => return Err(XRVErr::TableNameMustBeInBrackets(linenum, 3)),
+                    }
+                } else {
+                    return Err(XRVErr::SecondFieldLeftMustBeName(linenum, 2));
+                }
+            }
+            _ => return Err(XRVErr::FailToGetTableName(linenum, 2)),
+        };
+        let pos: usize = match line_links[4] {
+            Link::Left(nstart, nlen) => {
+                if [b'p', b'o', b's'] == line.buffer[nstart..nstart + nlen] {
+                    match line_links[5] {
+                        Link::Right(vstart, vlen) => {
+                            match std::str::from_utf8(&line.buffer[vstart..vstart + vlen]) {
+                                Err(err) => return Err(XRVErr::FailGetStrFrombuffer(linenum, 5)),
+                                Ok(num) => match num.parse::<usize>() {
+                                    Err(err) => {
+                                        return Err(XRVErr::FailGetUsizeFromStr(linenum, 5));
+                                    }
+                                    Ok(unum) => unum,
+                                },
+                            }
+                        }
+                        _ => return Err(XRVErr::FailToGetLinkRight(linenum, 5)),
+                    }
+                } else {
+                    return Err(XRVErr::ThirdFieldLeftMustBePos(linenum, 4));
+                }
+            }
+            _ => return Err(XRVErr::FailToGetTablePos(linenum, 4)),
+        };
+
+        let pos: usize = match line_links[6] {
+            Link::Left(nstart, nlen) => {
+                if [b'l', b'e', b'n'] == line.buffer[nstart..nstart + nlen] {
+                    match line_links[7] {
+                        Link::Right(vstart, vlen) => {
+                            match std::str::from_utf8(&line.buffer[vstart..vstart + vlen]) {
+                                Err(err) => return Err(XRVErr::FailGetStrFrombuffer(linenum, 5)),
+                                Ok(num) => match num.parse::<usize>() {
+                                    Err(err) => {
+                                        return Err(XRVErr::FailGetUsizeFromStr(linenum, 5));
+                                    }
+                                    Ok(unum) => unum,
+                                },
+                            }
+                        }
+                        _ => return Err(XRVErr::FailToGetLinkRight(linenum, 5)),
+                    }
+                } else {
+                    return Err(XRVErr::ForthFieldLeftMustBeLen(linenum, 4));
+                }
+            }
+            _ => return Err(XRVErr::FailToGetTableLen(linenum, 4)),
+        };
+
+        let mut cols: Vec<Col> = Vec::new();
+
+        let mut cols_idx: usize = 8;
+        loop {
+            let col: Col = match line_links[cols_idx] {
+                Link::Left(nstart, nlen) => {
+                    cols_idx += 1;
+                    match line_links[cols_idx] {
+                        Link::Right(vstart, vlen) => Col {
+                            name: line.buffer[nstart..nstart + nlen].to_vec(),
+                            kind: line.buffer[vstart..vstart + vlen].to_vec(),
+                        },
+                        _ => return Err(XRVErr::FailToGetColValue(linenum, cols_idx)),
+                    }
+                }
+                _ => return Err(XRVErr::FailToGetColName(linenum, cols_idx)),
+            };
+        }
+
+        Ok(table_line)
+    }
+
     // fn to_hashmap(fields: Vec<Field>) -> HashMap<Vec<u8>, Vec<u8>> {
     //     let mut hm: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
     //     for field in fields {
@@ -170,7 +293,7 @@ impl XRVReader {
     //     hm
     // }
 
-    pub fn links(line: Line, linenum: usize) -> Result<Vec<Link>, XRVErr> {
+    fn links(line: Line, linenum: usize) -> Result<Vec<Link>, XRVErr> {
         let mut state = FieldState::ExpectMid;
         let mut seek: usize = 0;
         let it = line.buffer.bytes();
