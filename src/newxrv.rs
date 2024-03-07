@@ -6,12 +6,19 @@ enum LineKind {
     Record,
 }
 
-enum TableLine {
-    LineDesc,
-    LinePos,
-    LineLen,
-    TableCol,
+struct TableLine<'b> {
+    id: &'b [u8],
+    name: &'b [u8],
+    pos: usize,
+    len: usize,
+    cols: Vec<&'b Field>,
 }
+// enum TableLine {
+//     LineDesc,
+//     LinePos,
+//     LineLen,
+//     TableCol,
+// }
 
 enum StyleLine {
     StyleProp,
@@ -196,5 +203,25 @@ impl<'b> TryFrom<&'b [u8]> for LineLink<'b> {
             name: &name,
             links,
         })
+    }
+}
+
+impl TryFrom<Field> for usize {
+    type Error = XRVErr;
+    fn try_from(value: Field) -> Result<Self, Self::Error> {
+        match std::str::from_utf8(value.value) {
+            Err(err) => Err(XRVErr::CantGetFieldUsizeValue),
+            Ok(s) => match 
+        }
+    }
+}
+
+impl<'b> TryFrom<LineField<'b>> for TableLine<'b> {
+    type Error = XRVErr;
+    fn try_from(value: LineField<'b>) -> Result<Self, Self::Error> {
+        match value.kind {
+            LineKind::Table => todo!(),
+            _ => return Err(XRVErr::NotTableLine),
+        }
     }
 }

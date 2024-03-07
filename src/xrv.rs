@@ -80,6 +80,7 @@ pub enum XRVErr {
     FailedToConsumePairs,
     FailToGetLineKind,
     FailToGetLineName,
+    NotTableLine,
 }
 
 pub enum Lines {
