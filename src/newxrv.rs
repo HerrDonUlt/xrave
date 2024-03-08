@@ -6,13 +6,6 @@ enum LineKind {
     Record,
 }
 
-struct TableLine<'b> {
-    id: &'b [u8],
-    name: &'b [u8],
-    pos: usize,
-    len: usize,
-    cols: Vec<&'b Field>,
-}
 // enum TableLine {
 //     LineDesc,
 //     LinePos,
@@ -34,13 +27,13 @@ enum ExpectField {
 
 struct LineField<'b> {
     kind: LineKind,
-    name: &'b [u8],
+    name: &'b str,
     fields: Vec<Field<'b>>,
 }
 
 struct Field<'b> {
-    name: &'b [u8],
-    value: &'b [u8],
+    name: &'b str,
+    value: &'b str,
 }
 
 struct LineLink<'b> {
@@ -57,20 +50,33 @@ struct Link {
     value_end: usize,
 }
 
-impl<'b> From<LineLink<'b>> for LineField<'b> {
-    fn from(value: LineLink) -> Self {
+impl<'b> TryFrom<LineLink<'b>> for LineField<'b> {
+    type Error = XRVErr;
+    fn try_from(value: LineLink) -> Result<Self, Self::Error> {
         let mut fields: Vec<Field<'b>> = Vec::new();
         for link in value.links {
-            fields.push(Field {
-                name: &value.buffer[link.name_start..link.name_end],
-                value: &value.buffer[link.value_start..link.value_end],
-            });
+            let name: &'b str =
+                match std::str::from_utf8(&value.buffer[link.name_start..link.name_end]) {
+                    Err(_) => return Err(XRVErr::CantParseFieldStrName),
+                    Ok(s) => s,
+                };
+            let value: &'b str =
+                match std::str::from_utf8(&value.buffer[link.value_start..link.value_end]) {
+                    Err(_) => return Err(XRVErr::CantParseFieldStrValue),
+                    Ok(s) => s,
+                };
+            fields.push(Field { name, value });
         }
-        Self {
+
+        let linename: &'b str = match std::str::from_utf8(value.name) {
+            Err(_) => return Err(XRVErr::CantParseFieldName),
+            Ok(s) => s,
+        };
+        Ok(Self {
             kind: value.kind,
-            name: value.name,
+            name: linename,
             fields,
-        }
+        })
     }
 }
 
@@ -206,21 +212,59 @@ impl<'b> TryFrom<&'b [u8]> for LineLink<'b> {
     }
 }
 
-impl TryFrom<Field> for usize {
+impl<'b> TryInto<usize> for Field<'b> {
     type Error = XRVErr;
-    fn try_from(value: Field) -> Result<Self, Self::Error> {
-        match std::str::from_utf8(value.value) {
-            Err(err) => Err(XRVErr::CantGetFieldUsizeValue),
-            Ok(s) => match 
+    fn try_into(self) -> Result<usize, Self::Error> {
+        match self.value.parse::<usize>() {
+            Err(_) => Err(XRVErr::CantParseFieldUsizeValue),
+            Ok(u) => Ok(u),
         }
     }
+}
+
+struct TableLine<'b> {
+    id: &'b str,
+    name: &'b str,
+    pos: usize,
+    len: usize,
+    cols: Vec<Field<'b>>,
 }
 
 impl<'b> TryFrom<LineField<'b>> for TableLine<'b> {
     type Error = XRVErr;
     fn try_from(value: LineField<'b>) -> Result<Self, Self::Error> {
         match value.kind {
-            LineKind::Table => todo!(),
+            LineKind::Table => {
+                let id: &'b str = value.fields[0].value;
+                let name: &'b str = match value.fields[1].name {
+                    "name" => value.fields[1].value,
+
+                    _ => return Err(XRVErr::FirstFieldMustBeName),
+                };
+
+                let pos: usize = match value.fields[2].name {
+                    "pos" => value.fields[2].try_into()?,
+                    _ => return Err(XRVErr::SecondFieldMustBePos),
+                };
+                let len: usize = match value.fields[3].name {
+                    "len" => value.fields[3].try_into()?,
+                    _ => return Err(XRVErr::SecondFieldMustBePos),
+                };
+
+                let mut cols: Vec<Field<'b>> = Vec::new();
+
+                for col in value.fields[4..].iter() {
+                    cols.push(*col);
+                }
+
+                Ok(TableLine {
+                    id,
+                    name,
+                    pos,
+                    len,
+                    cols,
+                })
+            }
             _ => return Err(XRVErr::NotTableLine),
         }
     }

@@ -81,6 +81,13 @@ pub enum XRVErr {
     FailToGetLineKind,
     FailToGetLineName,
     NotTableLine,
+    CantParseFieldUsizeValue,
+    CantGetFieldUsizeValue,
+    CantParseFieldStrName,
+    CantParseFieldStrValue,
+    CantParseFieldName,
+    FirstFieldMustBeName,
+    SecondFieldMustBePos,
 }
 
 pub enum Lines {
