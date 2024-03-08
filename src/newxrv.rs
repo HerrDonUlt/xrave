@@ -1,20 +1,10 @@
-use crate::xrv::XRVErr;
+use std::io::prelude::*;
+use std::{collections::HashMap, fs::File, io::BufReader};
 
 enum LineKind {
     Table,
     Style,
     Record,
-}
-
-// enum TableLine {
-//     LineDesc,
-//     LinePos,
-//     LineLen,
-//     TableCol,
-// }
-
-enum StyleLine {
-    StyleProp,
 }
 
 enum ExpectField {
@@ -238,17 +228,16 @@ impl<'b> TryFrom<LineField<'b>> for TableLine<'b> {
                 let id: &'b str = value.fields[0].value;
                 let name: &'b str = match value.fields[1].name {
                     "name" => value.fields[1].value,
-
-                    _ => return Err(XRVErr::FirstFieldMustBeName),
+                    _ => return Err(XRVErr::FirstTableFieldMustBeName),
                 };
 
                 let pos: usize = match value.fields[2].name {
                     "pos" => value.fields[2].try_into()?,
-                    _ => return Err(XRVErr::SecondFieldMustBePos),
+                    _ => return Err(XRVErr::SecondTableFieldMustBePos),
                 };
                 let len: usize = match value.fields[3].name {
                     "len" => value.fields[3].try_into()?,
-                    _ => return Err(XRVErr::SecondFieldMustBePos),
+                    _ => return Err(XRVErr::ThirdTableFieldMustBeLen),
                 };
 
                 let mut cols: Vec<Field<'b>> = Vec::new();
@@ -268,4 +257,146 @@ impl<'b> TryFrom<LineField<'b>> for TableLine<'b> {
             _ => return Err(XRVErr::NotTableLine),
         }
     }
+}
+
+struct StyleLine<'b> {
+    id: &'b str,
+    cols: Vec<Field<'b>>,
+}
+
+impl<'b> TryFrom<LineField<'b>> for StyleLine<'b> {
+    type Error = XRVErr;
+    fn try_from(value: LineField<'b>) -> Result<Self, Self::Error> {
+        match value.kind {
+            LineKind::Style => {
+                let id: &'b str = value.fields[0].value;
+                let mut cols: Vec<Field<'b>> = Vec::new();
+                for col in value.fields[1..].iter() {
+                    cols.push(*col);
+                }
+
+                Ok(StyleLine { id, cols })
+            }
+            _ => return Err(XRVErr::NotStyleLine),
+        }
+    }
+}
+
+struct RecordLine<'b> {
+    id: &'b str,
+    cols: Vec<Field<'b>>,
+}
+
+impl<'b> TryFrom<LineField<'b>> for RecordLine<'b> {
+    type Error = XRVErr;
+    fn try_from(value: LineField<'b>) -> Result<Self, Self::Error> {
+        match value.kind {
+            LineKind::Record => {
+                let id: &'b str = value.fields[0].value;
+                let mut cols: Vec<Field<'b>> = Vec::new();
+                for col in value.fields[1..].iter() {
+                    cols.push(col);
+                }
+
+                Ok(RecordLine { id, cols })
+            }
+            _ => Err(XRVErr::NotRecordLine),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Reader<'b> {
+    buffer: BufReader<File>,
+    pub line: usize,
+    pub seek: usize,
+    pub styles: HashMap<Vec<u8>, Vec<TableLine<'b>>>,
+    pub tables: HashMap<Vec<u8>, Vec<TableLine<'b>>>,
+}
+
+impl<'b> Reader<'b> {
+    pub fn new(path: String) -> Result<Reader<'b>, XRVErr> {
+        match File::open(path) {
+            Err(err) => Err(XRVErr::FailToOpenFile(err)),
+            Ok(file) => Ok(Reader {
+                buffer: BufReader::new(file),
+                line: 0,
+                seek: 0,
+                styles: HashMap::new(),
+                tables: HashMap::new(),
+            }),
+        }
+    }
+
+    fn next(&mut self) -> Result<LineLink, XRVErr> {
+        let mut buffer: Vec<u8> = Vec::new();
+        let start = match self.buffer.stream_position() {
+            Err(err) => return Err(XRVErr::FailToGetStreamPosition(err)),
+            Ok(pos) => pos,
+        };
+        match self.buffer.read_until(NL_CHAR, &mut buffer) {
+            Err(err) => return Err(XRVErr::FailToReadUntil(err)),
+            Ok(len) => match len {
+                0 => Err(XRVErr::ZeroLine(self.line)),
+                _ => {
+                    self.line += 1;
+                    return Ok(buffer.as_slice().try_into()?);
+                }
+            },
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum XRVErr {
+    FailToOpenFile(std::io::Error),
+    FailToReadUntil(std::io::Error),
+    FailToEnumerateByte(usize),
+
+    FieldNameFailedToParse(usize, usize),
+    FieldValueFailedToParse(usize, usize),
+    NextFieldFailedToParse(usize, usize),
+    FieldBracketFailedToParse(usize, usize),
+
+    ZeroLine(usize),
+
+    FailedToConsumeRefs(usize, usize),
+
+    FailToGetStreamPosition(std::io::Error),
+
+    NotExpectingNewline(usize, usize),
+    ExpectEndNotMidOrStart(usize, usize),
+    ExpectColon(usize, usize),
+    ExpectSpace(usize, usize),
+
+    FailToGetLinkRight(usize, usize),
+
+    TableNameMustBeInBrackets(usize, usize),
+    SecondFieldLeftMustBeName(usize, usize),
+    FailToGetTableName(usize, usize),
+    FailGetStrFrombuffer(usize, usize),
+    FailGetUsizeFromStr(usize, usize),
+    ThirdFieldLeftMustBePos(usize, usize),
+    FailToGetTablePos(usize, usize),
+    ForthFieldLeftMustBeLen(usize, usize),
+    FailToGetTableLen(usize, usize),
+    NameMustFolowedByColon,
+    NameMustNotContainQoutes,
+    ExpectSpaceOrAlpha,
+    ExpectAlpha,
+    ExpectingSpaceOrNewline,
+    ExpectingQouteNotNewline,
+    FailedToConsumePairs,
+    FailToGetLineKind,
+    FailToGetLineName,
+    NotTableLine,
+    CantParseFieldUsizeValue,
+    CantGetFieldUsizeValue,
+    CantParseFieldStrName,
+    CantParseFieldStrValue,
+    CantParseFieldName,
+    FirstTableFieldMustBeName,
+    SecondTableFieldMustBePos,
+    ThirdTableFieldMustBeLen,
+    FillBufNotAvailable,
 }
