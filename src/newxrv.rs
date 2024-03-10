@@ -1,6 +1,7 @@
 use std::io::prelude::*;
 use std::{collections::HashMap, fs::File, io::BufReader};
 
+#[derive(Debug)]
 enum LineKind {
     Table,
     Style,
@@ -15,17 +16,21 @@ enum ExpectField {
     Qoute,
 }
 
+#[derive(Debug)]
 struct LineField<'b> {
+    buffer: &'b [u8],
     kind: LineKind,
     name: &'b str,
     fields: Vec<Field<'b>>,
 }
 
+#[derive(Debug, Clone)]
 struct Field<'b> {
     name: &'b str,
     value: &'b str,
 }
 
+#[derive(Debug)]
 struct LineLink<'b> {
     buffer: &'b [u8],
     kind: LineKind,
@@ -33,6 +38,7 @@ struct LineLink<'b> {
     links: Vec<Link>,
 }
 
+#[derive(Debug)]
 struct Link {
     name_start: usize,
     name_end: usize,
@@ -40,10 +46,17 @@ struct Link {
     value_end: usize,
 }
 
-impl<'b> TryFrom<LineLink<'b>> for LineField<'b> {
+impl<'b, 'l> TryFrom<LineLink<'l>> for LineField<'b>
+where
+    LineLink<'l>: 'b,
+{
     type Error = XRVErr;
-    fn try_from(value: LineLink) -> Result<Self, Self::Error> {
+    fn try_from(value: LineLink<'b>) -> Result<Self, Self::Error> {
         let mut fields: Vec<Field<'b>> = Vec::new();
+        let linename: &str = match std::str::from_utf8(value.name) {
+            Err(_) => return Err(XRVErr::CantParseFieldName),
+            Ok(s) => s,
+        };
         for link in value.links {
             let name: &'b str =
                 match std::str::from_utf8(&value.buffer[link.name_start..link.name_end]) {
@@ -58,11 +71,8 @@ impl<'b> TryFrom<LineLink<'b>> for LineField<'b> {
             fields.push(Field { name, value });
         }
 
-        let linename: &'b str = match std::str::from_utf8(value.name) {
-            Err(_) => return Err(XRVErr::CantParseFieldName),
-            Ok(s) => s,
-        };
         Ok(Self {
+            buffer: value.buffer,
             kind: value.kind,
             name: linename,
             fields,
@@ -85,11 +95,13 @@ const SPACE_CHAR: u8 = b' ';
 const CR_CHAR: u8 = b'\r';
 const NL_CHAR: u8 = b'\n';
 
-impl<'b> TryFrom<&'b [u8]> for LineLink<'b> {
+impl<'b, 'l> TryFrom<&'l [u8]> for LineLink<'b>
+where
+    &'l [u8]: 'b,
+{
     type Error = XRVErr;
-    fn try_from(value: &'b [u8]) -> Result<Self, XRVErr> {
+    fn try_from(value: &'l [u8]) -> Result<Self, XRVErr> {
         let mut state = ExpectField::Name;
-        let it = value.into_iter();
         let mut seek: usize = 0;
         let mut idx: usize = 0;
 
@@ -144,6 +156,7 @@ impl<'b> TryFrom<&'b [u8]> for LineLink<'b> {
                         });
                         break;
                     }
+                    _ => continue,
                 },
                 ExpectField::Qoute => match *byte {
                     COLON_CHAR | SPACE_CHAR => continue,
@@ -156,6 +169,7 @@ impl<'b> TryFrom<&'b [u8]> for LineLink<'b> {
                         seek = idx + 1;
                         state = ExpectField::Skip;
                     }
+                    _ => continue,
                 },
             };
             idx += 1;
@@ -170,6 +184,7 @@ impl<'b> TryFrom<&'b [u8]> for LineLink<'b> {
                 [b't'] => LineKind::Table,
                 [b's'] => LineKind::Style,
                 [b'r'] => LineKind::Record,
+                _ => return Err(XRVErr::UnkwnownLineKind),
             },
         };
 
@@ -212,6 +227,7 @@ impl<'b> TryInto<usize> for Field<'b> {
     }
 }
 
+#[derive(Debug)]
 struct TableLine<'b> {
     id: &'b str,
     name: &'b str,
@@ -232,19 +248,15 @@ impl<'b> TryFrom<LineField<'b>> for TableLine<'b> {
                 };
 
                 let pos: usize = match value.fields[2].name {
-                    "pos" => value.fields[2].try_into()?,
+                    "pos" => value.fields[2].clone().try_into()?,
                     _ => return Err(XRVErr::SecondTableFieldMustBePos),
                 };
                 let len: usize = match value.fields[3].name {
-                    "len" => value.fields[3].try_into()?,
+                    "len" => value.fields[3].clone().try_into()?,
                     _ => return Err(XRVErr::ThirdTableFieldMustBeLen),
                 };
 
-                let mut cols: Vec<Field<'b>> = Vec::new();
-
-                for col in value.fields[4..].iter() {
-                    cols.push(*col);
-                }
+                let mut cols: Vec<Field<'b>> = value.fields[4..].to_owned();
 
                 Ok(TableLine {
                     id,
@@ -272,7 +284,7 @@ impl<'b> TryFrom<LineField<'b>> for StyleLine<'b> {
                 let id: &'b str = value.fields[0].value;
                 let mut cols: Vec<Field<'b>> = Vec::new();
                 for col in value.fields[1..].iter() {
-                    cols.push(*col);
+                    cols.push(col.clone());
                 }
 
                 Ok(StyleLine { id, cols })
@@ -295,7 +307,7 @@ impl<'b> TryFrom<LineField<'b>> for RecordLine<'b> {
                 let id: &'b str = value.fields[0].value;
                 let mut cols: Vec<Field<'b>> = Vec::new();
                 for col in value.fields[1..].iter() {
-                    cols.push(col);
+                    cols.push(col.clone());
                 }
 
                 Ok(RecordLine { id, cols })
@@ -307,7 +319,7 @@ impl<'b> TryFrom<LineField<'b>> for RecordLine<'b> {
 
 #[derive(Debug)]
 pub struct Reader<'b> {
-    buffer: BufReader<File>,
+    buffer: Vec<u8>,
     pub line: usize,
     pub seek: usize,
     pub styles: HashMap<Vec<u8>, Vec<TableLine<'b>>>,
@@ -319,7 +331,7 @@ impl<'b> Reader<'b> {
         match File::open(path) {
             Err(err) => Err(XRVErr::FailToOpenFile(err)),
             Ok(file) => Ok(Reader {
-                buffer: BufReader::new(file),
+                buffer: Reader::buffer(path)?,
                 line: 0,
                 seek: 0,
                 styles: HashMap::new(),
@@ -328,19 +340,34 @@ impl<'b> Reader<'b> {
         }
     }
 
-    fn next(&mut self) -> Result<LineLink, XRVErr> {
-        let mut buffer: Vec<u8> = Vec::new();
-        let start = match self.buffer.stream_position() {
-            Err(err) => return Err(XRVErr::FailToGetStreamPosition(err)),
-            Ok(pos) => pos,
-        };
+    fn buffer(path: String) -> Result<Vec<u8>, XRVErr> {
+        match File::open(path) {
+            Err(err) => Err(XRVErr::FailToOpenFile(err)),
+            Ok(mut file) => {
+                let capacity: usize = file.metadata().unwrap().len() as usize;
+                let mut buffer: Vec<u8> = Vec::with_capacity(capacity);
+                file.read_to_end(&mut buffer);
+                Ok(buffer)
+            }
+        }
+    }
+
+    pub fn next(&mut self) -> Result<LineLink<'b>, XRVErr> {
+        let mut buffer: &'b mut Vec<u8>;
+        buffer = &mut Vec::new();
+        // let start = match self.buffer.stream_position() {
+        //     Err(err) => return Err(XRVErr::FailToGetStreamPosition(err)),
+        //     Ok(pos) => pos,
+        // };
+        self.buffer.buffer()
         match self.buffer.read_until(NL_CHAR, &mut buffer) {
             Err(err) => return Err(XRVErr::FailToReadUntil(err)),
             Ok(len) => match len {
                 0 => Err(XRVErr::ZeroLine(self.line)),
                 _ => {
                     self.line += 1;
-                    return Ok(buffer.as_slice().try_into()?);
+                    let some: LineLink<'b> = buf.to_vec().as_slice().try_into()?;
+                    return Ok(some);
                 }
             },
         }
@@ -399,4 +426,7 @@ pub enum XRVErr {
     SecondTableFieldMustBePos,
     ThirdTableFieldMustBeLen,
     FillBufNotAvailable,
+    NotStyleLine,
+    NotRecordLine,
+    UnkwnownLineKind,
 }
