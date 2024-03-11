@@ -3,6 +3,7 @@ use std::{collections::HashMap, fs::File, io::BufReader};
 
 #[derive(Debug)]
 enum LineKind {
+    Jump,
     Table,
     Style,
     Record,
@@ -31,6 +32,22 @@ struct Field<'b> {
 }
 
 #[derive(Debug)]
+
+struct Jump<'b> {
+    name: &'b str,
+    seek: usize,
+    len: usize,
+}
+
+#[derive(Debug)]
+struct LineJump<'b> {
+    buffer: &'b [u8],
+    kind: LineKind,
+    name: &'b str,
+    jumps: Vec<Jump<'b>>,
+}
+
+#[derive(Debug)]
 struct LineLink<'b> {
     buffer: &'b [u8],
     kind: LineKind,
@@ -44,6 +61,57 @@ struct Link {
     name_end: usize,
     value_start: usize,
     value_end: usize,
+}
+
+impl<'b, 'l> TryFrom<LineLink<'l>> for LineJump<'b>
+where
+    LineLink<'l>: 'b,
+{
+    type Error = XRVErr;
+    fn try_from(value: LineLink<'l>) -> Result<Self, Self::Error> {
+        match std::str::from_utf8(value.name) {
+            Err(_) => return Err(XRVErr::CantParseFieldName),
+            Ok(s) => match s {
+                "jumps" => {
+                    let mut jumps: Vec<Jump<'b>> = Vec::new();
+                    for link in value.links {
+                        let name: &'b str = match std::str::from_utf8(
+                            &value.buffer[link.name_start..link.name_end],
+                        ) {
+                            Err(_) => return Err(XRVErr::CantParseFieldStrName),
+                            Ok(s) => s,
+                        };
+
+                        let value: &'b str = match std::str::from_utf8(
+                            &value.buffer[link.value_start..link.value_end],
+                        ) {
+                            Err(_) => return Err(XRVErr::CantParseFieldStrValue),
+                            Ok(s) => s,
+                        };
+
+                        let split: Vec<&'b str> = value.split("-").collect();
+                        let seek = match split[0].parse::<usize>() {
+                            Err(_) => return Err(XRVErr::CantParseFieldUsizeValue),
+                            Ok(u) => u,
+                        };
+                        let len = match split[0].parse::<usize>() {
+                            Err(_) => return Err(XRVErr::CantParseFieldUsizeValue),
+                            Ok(u) => u,
+                        };
+
+                        jumps.push(Jump { name, seek, len });
+                    }
+                    return Ok(LineJump {
+                        buffer: value.buffer,
+                        kind: LineKind::Jump,
+                        name: "jumps",
+                        jumps,
+                    });
+                }
+                _ => return Err(XRVErr::ItsNotAJumpsLine),
+            },
+        };
+    }
 }
 
 impl<'b, 'l> TryFrom<LineLink<'l>> for LineField<'b>
@@ -95,18 +163,15 @@ const SPACE_CHAR: u8 = b' ';
 const CR_CHAR: u8 = b'\r';
 const NL_CHAR: u8 = b'\n';
 
-impl<'b, 'l> TryFrom<&'l [u8]> for LineLink<'b>
-where
-    &'l [u8]: 'b,
-{
+impl<'b> TryFrom<Vec<u8>> for LineLink<'b> {
     type Error = XRVErr;
-    fn try_from(value: &'l [u8]) -> Result<Self, XRVErr> {
+    fn try_from(value: Vec<u8>) -> Result<Self, XRVErr> {
         let mut state = ExpectField::Name;
         let mut seek: usize = 0;
         let mut idx: usize = 0;
 
         let mut pairs: Vec<Pair> = Vec::new();
-        for byte in value {
+        for byte in &value {
             match state {
                 ExpectField::Name => match *byte {
                     COLON_CHAR | QUOTE_CHAR | CR_CHAR | NL_CHAR => {
@@ -180,7 +245,7 @@ where
 
         let kind: LineKind = match pairs_it.next() {
             None => return Err(XRVErr::FailToGetLineKind),
-            Some(k) => match value[k.start..k.end] {
+            Some(k) => match &value[k.start..k.end] {
                 [b't'] => LineKind::Table,
                 [b's'] => LineKind::Style,
                 [b'r'] => LineKind::Record,
@@ -317,59 +382,43 @@ impl<'b> TryFrom<LineField<'b>> for RecordLine<'b> {
     }
 }
 
+const DEFAULT_XRAVE_NEW_BUFFER_CAPACITY: usize = 4 * 1024;
+
+#[derive(Debug)]
+struct XraveBuffer {
+    buffer: Vec<u8>,
+    line: usize,
+}
+
+impl XraveBuffer {
+    fn new() -> Self {
+        XraveBuffer {
+            buffer: Vec::new(),
+            line: 0,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Reader<'b> {
-    buffer: Vec<u8>,
-    pub line: usize,
-    pub seek: usize,
-    pub styles: HashMap<Vec<u8>, Vec<TableLine<'b>>>,
-    pub tables: HashMap<Vec<u8>, Vec<TableLine<'b>>>,
+    buffer: XraveBuffer,
+    line_jump: LineJump<'b>,
 }
 
 impl<'b> Reader<'b> {
     pub fn new(path: String) -> Result<Reader<'b>, XRVErr> {
         match File::open(path) {
             Err(err) => Err(XRVErr::FailToOpenFile(err)),
-            Ok(file) => Ok(Reader {
-                buffer: Reader::buffer(path)?,
-                line: 0,
-                seek: 0,
-                styles: HashMap::new(),
-                tables: HashMap::new(),
-            }),
-        }
-    }
-
-    fn buffer(path: String) -> Result<Vec<u8>, XRVErr> {
-        match File::open(path) {
-            Err(err) => Err(XRVErr::FailToOpenFile(err)),
             Ok(mut file) => {
-                let capacity: usize = file.metadata().unwrap().len() as usize;
-                let mut buffer: Vec<u8> = Vec::with_capacity(capacity);
-                file.read_to_end(&mut buffer);
-                Ok(buffer)
+                let mut meta = Vec::with_capacity(DEFAULT_XRAVE_NEW_BUFFER_CAPACITY);
+                file.read_exact(&mut meta);
+                let line_link: LineLink<'b> = meta.try_into()?;
+                let line_jump: LineJump<'b> = line_link.try_into()?;
+                Ok(Reader {
+                    buffer: XraveBuffer::new(),
+                    line_jump,
+                })
             }
-        }
-    }
-
-    pub fn next(&mut self) -> Result<LineLink<'b>, XRVErr> {
-        let mut buffer: &'b mut Vec<u8>;
-        buffer = &mut Vec::new();
-        // let start = match self.buffer.stream_position() {
-        //     Err(err) => return Err(XRVErr::FailToGetStreamPosition(err)),
-        //     Ok(pos) => pos,
-        // };
-        self.buffer.buffer()
-        match self.buffer.read_until(NL_CHAR, &mut buffer) {
-            Err(err) => return Err(XRVErr::FailToReadUntil(err)),
-            Ok(len) => match len {
-                0 => Err(XRVErr::ZeroLine(self.line)),
-                _ => {
-                    self.line += 1;
-                    let some: LineLink<'b> = buf.to_vec().as_slice().try_into()?;
-                    return Ok(some);
-                }
-            },
         }
     }
 }
@@ -377,36 +426,6 @@ impl<'b> Reader<'b> {
 #[derive(Debug)]
 pub enum XRVErr {
     FailToOpenFile(std::io::Error),
-    FailToReadUntil(std::io::Error),
-    FailToEnumerateByte(usize),
-
-    FieldNameFailedToParse(usize, usize),
-    FieldValueFailedToParse(usize, usize),
-    NextFieldFailedToParse(usize, usize),
-    FieldBracketFailedToParse(usize, usize),
-
-    ZeroLine(usize),
-
-    FailedToConsumeRefs(usize, usize),
-
-    FailToGetStreamPosition(std::io::Error),
-
-    NotExpectingNewline(usize, usize),
-    ExpectEndNotMidOrStart(usize, usize),
-    ExpectColon(usize, usize),
-    ExpectSpace(usize, usize),
-
-    FailToGetLinkRight(usize, usize),
-
-    TableNameMustBeInBrackets(usize, usize),
-    SecondFieldLeftMustBeName(usize, usize),
-    FailToGetTableName(usize, usize),
-    FailGetStrFrombuffer(usize, usize),
-    FailGetUsizeFromStr(usize, usize),
-    ThirdFieldLeftMustBePos(usize, usize),
-    FailToGetTablePos(usize, usize),
-    ForthFieldLeftMustBeLen(usize, usize),
-    FailToGetTableLen(usize, usize),
     NameMustFolowedByColon,
     NameMustNotContainQoutes,
     ExpectSpaceOrAlpha,
@@ -418,15 +437,14 @@ pub enum XRVErr {
     FailToGetLineName,
     NotTableLine,
     CantParseFieldUsizeValue,
-    CantGetFieldUsizeValue,
     CantParseFieldStrName,
     CantParseFieldStrValue,
     CantParseFieldName,
     FirstTableFieldMustBeName,
     SecondTableFieldMustBePos,
-    ThirdTableFieldMustBeLen,
-    FillBufNotAvailable,
+    ItsNotAJumpsLine,
     NotStyleLine,
     NotRecordLine,
     UnkwnownLineKind,
+    ThirdTableFieldMustBeLen,
 }
